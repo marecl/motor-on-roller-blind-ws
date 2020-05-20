@@ -14,6 +14,27 @@ WebSocket based version of [motor-on-roller-blind](https://github.com/nidayand/m
 - A message to `/raw/esp8266/[chip-id]/in` will steer the blind according to the "payload actions" below
 - Updates from the device will be sent to topic `/raw/esp8266/[chip-id]/out`
 
+## Home Assistant YAML
+
+Replace "[chipid]" with your chipid that you can find by subscribing to the topic "/raw/esp8266/#"
+
+```yaml
+cover:
+  - platform: mqtt
+    name: "DIY Roller Shade"
+    command_topic: "/raw/esp8266/[chipid]/in"
+    set_position_topic: "/raw/esp8266/[chipid]/in"
+    position_topic: "/raw/esp8266/[chipid]/out"
+    value_template: "{{ value_json.position }}"
+    json_attributes_topic: "/raw/esp8266/[chipid]/out"
+    json_attributes_template: "{{ value_json.position | tojson }}"
+    retain: false
+    payload_open: "100"
+    payload_close: "0"
+    position_open: 100
+    position_closed: 0
+  ```
+
 ### If you don't want to use MQTT
 Simply do not enter any string in the MQTT server form field upon WIFI configuration of the device (step 3 above)
 
