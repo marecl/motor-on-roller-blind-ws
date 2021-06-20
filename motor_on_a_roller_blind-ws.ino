@@ -1,3 +1,7 @@
+/******************  ALEXA INTEGRATION LIBRARIES *************************************/
+#include <Espalexa.h>       //https://github.com/Aircoookie/Espalexa
+#include <ESP8266mDNS.h>          //if you get an error here you need to install the ESP8266 board manager
+/******************  ORIGINAL SKETCH LIBRARIES *************************************/
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
 #include <ESP8266mDNS.h>
@@ -15,24 +19,27 @@
 
 //--------------- CHANGE PARAMETERS ------------------
 //Configure Default Settings for Access Point logon
-String APid = "BlindsConnectAP";    //Name of access point
-String APpw = "nidayand";           //Hardcoded password for access point
+String APid = "Roller Shade Configuration";    //Name of access point
 
 //Set up buttons
-const uint8_t btnup = D5; //Up button
+const uint8_t btnup = D7; //Up button
 const uint8_t btndn = D6; //Down button
-const uint8_t btnres = D7; //Reset button
+const uint8_t btnres = D5; //Reset button
 
 //----------------------------------------------------
 
 // Version number for checking if there are new code releases and notifying the user
-String version = "1.3.3";
+String version = "1.3.1";
 
 NidayandHelper helper = NidayandHelper();
+Espalexa espalexa;
+EspalexaDevice* device1;
+void process_alexa_command(EspalexaDevice* dev);
 
 //Fixed settings for WIFI
 WiFiClient espClient;
 PubSubClient psclient(espClient);   //MQTT client
+char alexa_invocation[40];      //WIFI config: Alexa Invocation Name (optional)
 char mqtt_server[40];             //WIFI config: MQTT server config (optional)
 char mqtt_port[6] = "1883";       //WIFI config: MQTT port config (optional)
 char mqtt_uid[40];             //WIFI config: MQTT server username (optional)
@@ -54,6 +61,7 @@ boolean saveItNow = false;          //If true will store positions to SPIFFS
 bool shouldSaveConfig = false;      //Used for WIFI Manager callback to save parameters
 boolean initLoop = true;            //To enable actions first time the loop is run
 boolean ccw = true;                 //Turns counter clockwise to lower the curtain
+bool alexaActive = false;
 
 Stepper_28BYJ_48 small_stepper(D1, D3, D2, D4); //Initiate stepper driver
 
@@ -63,7 +71,7 @@ WebSocketsServer webSocket = WebSocketsServer(81);  // WebSockets will respond o
 bool loadConfig() {
   if (!helper.loadconfig())
     return false;
-
+  
   JsonVariant json = helper.getconfig();
 
   //Useful if you need to see why confing is read incorrectly
@@ -74,6 +82,7 @@ bool loadConfig() {
   maxPosition = json["maxPosition"].as<long>();
 
   strcpy(config_name, json["config_name"]);
+  strcpy(alexa_invocation, json["alexa_invocation"]);
   strcpy(mqtt_server, json["mqtt_server"]);
   strcpy(mqtt_port, json["mqtt_port"]);
   strcpy(mqtt_uid, json["mqtt_uid"]);
@@ -88,11 +97,12 @@ bool loadConfig() {
    on SPIFFS
 */
 bool saveConfig() {
-  DynamicJsonBuffer jsonBuffer(300);
+  DynamicJsonBuffer jsonBuffer(500);
   JsonObject& json = jsonBuffer.createObject();
   json["currentPosition"] = currentPosition;
   json["maxPosition"] = maxPosition;
   json["config_name"] = config_name;
+  json["alexa_invocation"] = alexa_invocation;
   json["mqtt_server"] = mqtt_server;
   json["mqtt_port"] = mqtt_port;
   json["mqtt_uid"] = mqtt_uid;
@@ -237,10 +247,34 @@ void handleNotFound() {
   message += "\nArguments: ";
   message += server.args();
   message += "\n";
+  if (alexaActive)
+  {
+    if (!espalexa.handleAlexaApiCall(server.uri(), server.arg(0)))
+    {
+      server.send(404, "text/plain", "Not found");
+    }
+  }
   for (uint8_t i = 0; i < server.args(); i++) {
     message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
   }
   server.send(404, "text/plain", message);
+}
+
+void process_alexa_command(EspalexaDevice* d)
+{
+  int brightnessCommand = d->getValue();
+  Serial.println("Got Data for Shade Position");
+  Serial.println(brightnessCommand);
+  if (brightnessCommand == 0)
+  {
+    processMsg("0", NULL);
+  }
+  else
+  {
+    int tempPosition = map(brightnessCommand, 0, 255, 0, 100);
+    String res = String(tempPosition);
+    processMsg(res, NULL);
+  }
 }
 
 void setup(void)
@@ -266,6 +300,8 @@ void setup(void)
   //Define customer parameters for WIFI Manager
   WiFiManagerParameter custom_config_name("Name", "Bonjour name", config_name, 40);
   WiFiManagerParameter custom_rotation("Rotation", "Clockwise rotation", config_rotation, 40);
+  WiFiManagerParameter custom_text3("<p><b>Optional Alexa configuration:</b></p>");
+  WiFiManagerParameter custom_alexa_invocation("invocation", "Invocation Name", alexa_invocation, 40);
   WiFiManagerParameter custom_text("<p><b>Optional MQTT server parameters:</b></p>");
   WiFiManagerParameter custom_mqtt_server("server", "MQTT server", mqtt_server, 40);
   WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqtt_port, 6);
@@ -273,6 +309,7 @@ void setup(void)
   WiFiManagerParameter custom_mqtt_pwd("pwd", "MQTT password", mqtt_server, 40);
   WiFiManagerParameter custom_text2("<script>t = document.createElement('div');t2 = document.createElement('input');t2.setAttribute('type', 'checkbox');t2.setAttribute('id', 'tmpcheck');t2.setAttribute('style', 'width:10%');t2.setAttribute('onclick', \"if(document.getElementById('Rotation').value == 'false'){document.getElementById('Rotation').value = 'true'} else {document.getElementById('Rotation').value = 'false'}\");t3 = document.createElement('label');tn = document.createTextNode('Clockwise rotation');t3.appendChild(t2);t3.appendChild(tn);t.appendChild(t3);document.getElementById('Rotation').style.display='none';document.getElementById(\"Rotation\").parentNode.insertBefore(t, document.getElementById(\"Rotation\"));</script>");
   //Setup WIFI Manager
+  
   WiFiManager wifiManager;
   
   //reset settings - for testing
@@ -283,6 +320,8 @@ void setup(void)
   //add all your parameters here
   wifiManager.addParameter(&custom_config_name);
   wifiManager.addParameter(&custom_rotation);
+  wifiManager.addParameter(&custom_text3);
+  wifiManager.addParameter(&custom_alexa_invocation);
   wifiManager.addParameter(&custom_text);
   wifiManager.addParameter(&custom_mqtt_server);
   wifiManager.addParameter(&custom_mqtt_port);
@@ -290,7 +329,21 @@ void setup(void)
   wifiManager.addParameter(&custom_mqtt_pwd);
   wifiManager.addParameter(&custom_text2);
 
-  wifiManager.autoConnect(APid.c_str(), APpw.c_str());
+//  if (digitalRead(btnres) == LOW)
+//  {
+//    helper.resetsettings(wifiManager);
+//    delay(2000);
+//    if (!wifiManager.autoConnect(APid.c_str())) 
+//    {
+//    Serial.println("failed to connect and hit timeout");
+//    delay(3000);
+//    //reset and try again, or maybe put it to deep sleep
+//    ESP.reset();
+//    delay(5000);
+//    }
+//  }
+
+  wifiManager.autoConnect(APid.c_str());
 
   //Load config upon start
   if (!SPIFFS.begin()) {
@@ -306,11 +359,12 @@ void setup(void)
     //read updated parameters
     strcpy(config_name, custom_config_name.getValue());
     strcpy(mqtt_server, custom_mqtt_server.getValue());
+    strcpy(alexa_invocation, custom_alexa_invocation.getValue());
     strcpy(mqtt_port, custom_mqtt_port.getValue());
     strcpy(mqtt_uid, custom_mqtt_uid.getValue());
     strcpy(mqtt_pwd, custom_mqtt_pwd.getValue());
     strcpy(config_rotation, custom_rotation.getValue());
-
+    
     //Save the data
     saveConfig();
   }
@@ -340,13 +394,35 @@ void setup(void)
       delay(1000);
     }
   }
+  
+  if (String(alexa_invocation) != "") {
+    espalexa.begin(&server);
+    Serial.println("Registering Alexa Device");
+    server.on("/", handleRoot);
+    server.onNotFound([]() {
+      if (!espalexa.handleAlexaApiCall(server.uri(), server.arg(0))) //if you don't know the URI, ask espalexa whether it is an Alexa control request
+      {
+        handleNotFound();
+      }
+    });
+
+    device1 = new EspalexaDevice(alexa_invocation, process_alexa_command, EspalexaDeviceType::color);
+    espalexa.addDevice(device1);
+    int pos = (currentPosition * 255) / maxPosition;
+    device1->setValue(pos);
+    alexaActive = true;
+  }
+  else {
+    alexaActive = false;
+    Serial.println("NOTE: No Alexa invocation is active. Only using websockets");
+    server.on("/", handleRoot);
+    server.onNotFound(handleNotFound);
+    server.begin();
+  }
   Serial.print("Connect to http://" + String(config_name) + ".local or http://");
   Serial.println(WiFi.localIP());
 
-  //Start HTTP server
-  server.on("/", handleRoot);
-  server.onNotFound(handleNotFound);
-  server.begin();
+
 
   //Start websocket
   webSocket.begin();
@@ -415,7 +491,17 @@ void loop(void)
   webSocket.loop();
 
   //Serving the webpage
-  server.handleClient();
+  if(alexaActive)
+  {
+    espalexa.loop();
+  }
+  else
+  {
+    server.handleClient();
+  }
+
+
+
 
   //MQTT client
   if (mqttActive)
@@ -524,5 +610,6 @@ void loop(void)
   if (initLoop) {
     initLoop = false;
     stopPowerToCoils();
+    Serial.println(alexa_invocation);
   }
 }
